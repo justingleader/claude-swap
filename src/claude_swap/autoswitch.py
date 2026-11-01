@@ -2199,6 +2199,12 @@ class AutoSwitchEngine:
                 active_binding.over if active_binding is not None else None,
             )
 
+        def most_room(num: str, h: float) -> tuple:
+            # Most raw headroom, the binding window's reset breaking an exact
+            # tie: the all-above key, and a consume-first escape's below its
+            # room bar.
+            return (-h, _binding_recovery_ts(usage.get(num), self._models, now))
+
         qualifying: list[tuple[tuple, str]] = []
         any_known = False
         for num in oauth_candidates:
@@ -2286,10 +2292,7 @@ class AutoSwitchEngine:
                 # reset of the window the room is measured on, the fullest one
                 # (no lines passed), since its rollover is what gives the
                 # account room again.
-                key: tuple = (
-                    -h,
-                    _binding_recovery_ts(usage.get(num), self._models, now),
-                )
+                key: tuple = most_room(num, h)
             elif consume_first:
                 # Soonest weekly reset first (unknown resets sort last), most
                 # policy headroom breaks ties, then sequence order. A forced
@@ -2300,12 +2303,26 @@ class AutoSwitchEngine:
                 key = (tight, reset_ts if reset_ts is not None else float("inf"), -lh)
             else:
                 key = (-lh,)
-            if trigger in ("at-limit", "failover"):
+            if trigger in ("at-limit", "failover") and not all_above:
                 # Escapes skip the landing gate on purpose (any account with
                 # real headroom beats a dead one) but must still prefer a target
-                # below its lines: ranking by weekly reset alone escaped onto an
-                # account at 7d 91% of a 90 line while one at 16% / 2% was free.
-                key = (over, *key)
+                # that can keep working, and one below its lines first: ranking
+                # by weekly reset alone escaped onto an account at Fable 94% of
+                # a 90 line while one at 1% / 3% was free (#305), and a target
+                # over a line is left again at the next cooldown.
+                if not consume_first:
+                    # best's key is already headroom; a room bar on top would
+                    # let a tenth of a point of room outrank points of headroom.
+                    key = (over, *key)
+                elif not over and room >= settings.hysteresis_pct:
+                    # Room to spare, the hysteresis margin under every line:
+                    # safe to spend the soonest weekly reset first.
+                    key = (0, *key)
+                else:
+                    # Without it the reset order took 7d 97.9% under a 98 line
+                    # over 44%. Most raw headroom instead, as when nothing is
+                    # under its lines (all_above, above), under-line first.
+                    key = (1, over, *most_room(num, h))
             qualifying.append((key, num))
         # Ascending by the strategy's key; list order (sequence order) breaks ties.
         qualifying.sort(key=lambda t: t[0])
